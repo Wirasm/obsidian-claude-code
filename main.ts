@@ -4,7 +4,21 @@ interface ClaudeCodeSettings {
     apiEndpoint: string;
     enableAutoConnect: boolean;
     showStatusBar: boolean;
-    savedChats?: ChatSessionData[];  // Persist chats
+    savedChats?: StoredChat[];  // Persist chats
+}
+
+// Stored chat format for persistence
+interface StoredChat {
+    id: string;
+    title: string;
+    icon: string;
+    createdAt: number;
+    lastMessageAt: number;
+    messages: ChatMessage[];
+    tokenUsage?: {
+        total: number;
+        percentage: number;
+    };
 }
 
 const DEFAULT_SETTINGS: ClaudeCodeSettings = {
@@ -90,7 +104,22 @@ class ChatListView extends ItemView {
         // List container
         this.listContainer = container.createDiv({ cls: 'claude-chat-list-container' });
 
-        // Request chat list from server
+        // Load saved chats from settings first
+        if (this.plugin.settings.savedChats && this.plugin.settings.savedChats.length > 0) {
+            this.chatList = this.plugin.settings.savedChats.map(saved => ({
+                id: saved.id,
+                title: saved.title,
+                icon: saved.icon,
+                createdAt: saved.createdAt,
+                lastMessageAt: saved.lastMessageAt,
+                messageCount: saved.messages.length,
+                preview: saved.messages[saved.messages.length - 1]?.content.substring(0, 100) || '',
+                tokenUsage: saved.tokenUsage
+            }));
+            this.renderChatList();
+        }
+
+        // Request chat list from server (will update if server has more info)
         this.requestChatList();
 
         // Listen for WebSocket messages
@@ -112,10 +141,27 @@ class ChatListView extends ItemView {
             if (message.type === 'chat_list') {
                 this.chatList = message.chats || [];
                 this.renderChatList();
+                // Sync to settings
+                this.plugin.saveChatList(this.chatList);
             } else if (message.type === 'chat_created') {
+                // Save the new chat immediately
+                const newChat: StoredChat = {
+                    id: message.chat.id,
+                    title: message.chat.title,
+                    icon: message.chat.icon,
+                    createdAt: Date.now(),
+                    lastMessageAt: Date.now(),
+                    messages: [],
+                    tokenUsage: { total: 0, percentage: 0 }
+                };
+                this.plugin.addStoredChat(newChat);
                 // Navigate to the new chat
                 this.plugin.openChat(message.chat.id);
             } else if (message.type === 'chat_deleted') {
+                // Remove from saved chats
+                if (message.chatId) {
+                    this.plugin.removeStoredChat(message.chatId);
+                }
                 // Refresh the list
                 this.requestChatList();
             }
@@ -200,9 +246,8 @@ class ChatListView extends ItemView {
     }
 
     showChatOptions(chat: ChatSessionData, button: HTMLElement) {
-        // Create context menu
-        const menu = document.createElement('div');
-        menu.className = 'claude-context-menu';
+        // Create context menu using Obsidian's API
+        const menu = document.body.createDiv({ cls: 'claude-context-menu' });
 
         // Position near button
         const rect = button.getBoundingClientRect();
@@ -215,22 +260,21 @@ class ChatListView extends ItemView {
         renameItem.setText('✏️ Rename');
         renameItem.onclick = () => {
             this.renameChat(chat);
-            document.body.removeChild(menu);
+            menu.remove();
         };
 
         const deleteItem = menu.createDiv({ cls: 'claude-menu-item danger' });
         deleteItem.setText('🗑️ Delete');
         deleteItem.onclick = () => {
             this.deleteChat(chat);
-            document.body.removeChild(menu);
+            menu.remove();
         };
 
-        // Add to body and handle clicks outside
-        document.body.appendChild(menu);
+        // Handle clicks outside
         setTimeout(() => {
             const closeMenu = (e: MouseEvent) => {
                 if (!menu.contains(e.target as Node)) {
-                    document.body.removeChild(menu);
+                    menu.remove();
                     document.removeEventListener('click', closeMenu);
                 }
             };
@@ -365,23 +409,47 @@ class ClaudeChatView extends ItemView {
         // Listen for WebSocket messages
         this.plugin.onMessageCallback = (data) => this.handleServerMessage(data);
 
-        // Load chat if provided
-        if (this.plugin.currentChatId) {
+        // Load chat if provided - ensure all elements are initialized
+        if (this.plugin.currentChatId && this.chatContainer && this.titleEl) {
             this.loadChat(this.plugin.currentChatId);
         }
     }
 
     loadChat(chatId: string) {
         this.chatId = chatId;
-        this.messages = [];
-        this.chatContainer?.empty();
 
-        // Request chat data from server
-        if (this.plugin.wsConnection?.readyState === WebSocket.OPEN) {
-            this.plugin.wsConnection.send(JSON.stringify({
-                type: 'load_chat',
-                chatId: chatId
-            }));
+        // First try to load from saved chats
+        const savedChat = this.plugin.settings.savedChats?.find(c => c.id === chatId);
+        if (savedChat) {
+            this.messages = savedChat.messages;
+            if (this.titleEl) {
+                this.titleEl.setText(`${savedChat.icon} ${savedChat.title}`);
+            }
+            this.renderMessages();
+            this.scrollToBottom();
+
+            // Send the chat history to the server so it knows about it
+            if (this.plugin.wsConnection?.readyState === WebSocket.OPEN) {
+                this.plugin.wsConnection.send(JSON.stringify({
+                    type: 'load_chat',
+                    chatId: chatId,
+                    messages: savedChat.messages
+                }));
+            }
+        } else {
+            // No saved chat, clear and request from server
+            this.messages = [];
+            if (this.chatContainer) {
+                this.chatContainer.empty();
+            }
+
+            // Request chat data from server
+            if (this.plugin.wsConnection?.readyState === WebSocket.OPEN) {
+                this.plugin.wsConnection.send(JSON.stringify({
+                    type: 'load_chat',
+                    chatId: chatId
+                }));
+            }
         }
     }
 
@@ -493,7 +561,9 @@ class ClaudeChatView extends ItemView {
 
         // Clear local messages
         this.messages = [];
-        this.chatContainer.empty();
+        if (this.chatContainer) {
+            this.chatContainer.empty();
+        }
 
         // Send clear history command to SDK server
         this.plugin.wsConnection.send(JSON.stringify({
@@ -564,10 +634,12 @@ class ClaudeChatView extends ItemView {
             const message = JSON.parse(data);
 
             if (message.type === 'chat_loaded') {
-                // Load existing messages
-                this.messages = message.messages || [];
-                this.renderMessages();
-                this.scrollToBottom();
+                // Only update if we don't already have messages (from saved data)
+                if (this.messages.length === 0) {
+                    this.messages = message.messages || [];
+                    this.renderMessages();
+                    this.scrollToBottom();
+                }
 
                 // Update token usage if available
                 if (message.tokenUsage) {
@@ -637,6 +709,11 @@ class ClaudeChatView extends ItemView {
                 }
                 this.renderMessages();
                 this.scrollToBottom();
+
+                // Save the updated chat
+                if (this.chatId) {
+                    this.plugin.updateStoredChat(this.chatId, this.messages);
+                }
             } else if (message.type === 'chat_error') {
                 this.updateLastAssistantMessage(`❌ Error: ${message.error}`);
             } else if (message.type === 'init_response') {
@@ -659,9 +736,15 @@ class ClaudeChatView extends ItemView {
         this.messages.push(message);
         this.renderMessages();
         this.scrollToBottom();
+
+        // Save to storage when messages are added
+        if (this.chatId) {
+            this.plugin.updateStoredChat(this.chatId, this.messages);
+        }
     }
 
     renderMessages() {
+        if (!this.chatContainer) return; // Safety check
         this.chatContainer.empty();
 
         for (const message of this.messages) {
@@ -693,6 +776,7 @@ class ClaudeChatView extends ItemView {
     }
 
     scrollToBottom() {
+        if (!this.chatContainer) return; // Safety check
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
     }
 
@@ -805,13 +889,7 @@ export default class ClaudeCodePlugin extends Plugin {
 
         if (leaf) {
             workspace.revealLeaf(leaf);
-            // Load the chat after view is ready
-            setTimeout(() => {
-                const view = leaf?.view as ClaudeChatView;
-                if (view && view.loadChat) {
-                    view.loadChat(chatId);
-                }
-            }, 100);
+            // The view will load the chat automatically via currentChatId
         }
     }
 
@@ -886,6 +964,50 @@ export default class ClaudeCodePlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    // Helper methods for chat persistence
+    saveChatList(chats: ChatSessionData[]) {
+        // Convert to stored format
+        this.settings.savedChats = chats.map(chat => ({
+            id: chat.id,
+            title: chat.title,
+            icon: chat.icon,
+            createdAt: chat.createdAt,
+            lastMessageAt: chat.lastMessageAt,
+            messages: [], // Will be populated when chat is active
+            tokenUsage: chat.tokenUsage
+        }));
+        this.saveSettings();
+    }
+
+    addStoredChat(chat: StoredChat) {
+        if (!this.settings.savedChats) {
+            this.settings.savedChats = [];
+        }
+        // Remove if exists (update)
+        this.settings.savedChats = this.settings.savedChats.filter(c => c.id !== chat.id);
+        // Add new/updated
+        this.settings.savedChats.push(chat);
+        this.saveSettings();
+    }
+
+    updateStoredChat(chatId: string, messages: ChatMessage[]) {
+        if (!this.settings.savedChats) return;
+
+        const chat = this.settings.savedChats.find(c => c.id === chatId);
+        if (chat) {
+            chat.messages = messages;
+            chat.lastMessageAt = Date.now();
+            this.saveSettings();
+        }
+    }
+
+    removeStoredChat(chatId: string) {
+        if (!this.settings.savedChats) return;
+
+        this.settings.savedChats = this.settings.savedChats.filter(c => c.id !== chatId);
+        this.saveSettings();
     }
 }
 

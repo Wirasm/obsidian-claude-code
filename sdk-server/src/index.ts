@@ -155,10 +155,46 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        const chat = connection.chats.get(message.chatId);
+        let chat = connection.chats.get(message.chatId);
+
+        // If chat doesn't exist but messages are provided, create it
+        if (!chat && message.messages) {
+          chat = {
+            id: message.chatId,
+            title: 'Restored Chat',
+            icon: '💬',
+            createdAt: Date.now(),
+            lastMessageAt: Date.now(),
+            messageCount: message.messages.length,
+            tokenUsage: {
+              totalInputTokens: 0,
+              totalOutputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0,
+              currentTurn: 0,
+              contextLimit: 200_000,
+              lastMessageInput: 0,
+              lastMessageOutput: 0
+            },
+            preview: message.messages[message.messages.length - 1]?.content.substring(0, 100) || '',
+            messages: message.messages
+          };
+          connection.chats.set(message.chatId, chat);
+        }
+
         if (!chat) {
           ws.send(JSON.stringify({ type: 'error', error: 'Chat not found' }));
           return;
+        }
+
+        // If messages were provided, update the chat
+        if (message.messages) {
+          chat.messages = message.messages;
+          chat.messageCount = message.messages.length;
+          chat.lastMessageAt = Date.now();
+          if (message.messages.length > 0) {
+            chat.preview = message.messages[message.messages.length - 1].content.substring(0, 100);
+          }
         }
 
         connection.currentChatId = message.chatId;
@@ -343,16 +379,23 @@ wss.on('connection', (ws) => {
         console.log(`   Chat: ${chat.title} (${chatId})`);
         console.log(`   Prompt: "${message.prompt.substring(0, 50)}..."`);
         console.log(`   Working directory: ${vaultPath}`);
-        console.log(`   Session state: ${chat.sessionId ? `Active (ID: ${chat.sessionId})` : 'New conversation'}`);
+        console.log(`   Messages in chat: ${chat.messages.length}`);
 
-        // Determine if we should continue or resume
-        let useResume = false;
-        let useContinue = false;
-
-        if (chat.sessionId) {
-          // We have a session ID - use resume
-          useResume = true;
-          console.log(`   Using resume with session: ${chat.sessionId}`);
+        // Build conversation history for context
+        let conversationContext = '';
+        if (chat.messages.length > 1) {
+          // Include previous messages for context (limit to last 10 exchanges)
+          const recentMessages = chat.messages.slice(-20); // Last 10 exchanges
+          for (const msg of recentMessages.slice(0, -1)) { // Exclude the current message we just added
+            if (msg.role === 'user') {
+              conversationContext += `\n\nUser: ${msg.content}`;
+            } else if (msg.role === 'assistant') {
+              conversationContext += `\n\nAssistant: ${msg.content}`;
+            }
+          }
+          if (conversationContext) {
+            conversationContext = `Previous conversation context:${conversationContext}\n\n---\n\nCurrent question: `;
+          }
         }
 
         // Send immediate acknowledgment
@@ -360,18 +403,20 @@ wss.on('connection', (ws) => {
           type: 'chat_start',
           id: message.id,
           chatId,
-          isNewSession: !chat.sessionId,
-          sessionId: chat.sessionId
+          isNewSession: chat.messages.length === 1,
+          sessionId: null
         }));
 
         try {
-          // Build query options with resume/continue based on chat state
+          // Build the full prompt with conversation context
+          const fullPrompt = conversationContext ? conversationContext + message.prompt : message.prompt;
+
+          // Build query options - NO resume, each message is independent
           const queryOptions: any = {
             cwd: vaultPath, // Work in the vault directory
             permissionMode: 'bypassPermissions' as const, // Don't ask for permission
             maxTurns: 10, // Allow multiple tool uses
             model: 'claude-sonnet-4-20250514',
-            ...(useResume ? { resume: chat.sessionId } : {}), // Use resume if we have a session ID
             appendSystemPrompt: `You are an expert assistant for managing an Obsidian knowledge base vault. Key Obsidian conventions:
 
 ## File Structure
@@ -413,9 +458,9 @@ wss.on('connection', (ws) => {
 Remember: The user is working in their personal knowledge management system. Be helpful in organizing, finding, creating, and connecting their notes effectively.`
           };
 
-          // Call Claude Code with the user's prompt
+          // Call Claude Code with the full prompt including context
           const messages = query({
-            prompt: message.prompt,
+            prompt: fullPrompt,
             options: queryOptions
           });
 
@@ -425,24 +470,8 @@ Remember: The user is working in their personal knowledge management system. Be 
 
           // Stream messages as they arrive
           for await (const msg of messages) {
-            // Extract session ID from any message that has it
-            if ('session_id' in msg && msg.session_id) {
-              currentSessionId = msg.session_id;
-
-              // Update chat's session ID if this is new or changed
-              if (!chat.sessionId || chat.sessionId !== currentSessionId) {
-                chat.sessionId = currentSessionId;
-                console.log(`📝 Session established for chat: ${currentSessionId}`);
-
-                // Notify Obsidian about the session
-                ws.send(JSON.stringify({
-                  type: 'session_established',
-                  chatId,
-                  sessionId: currentSessionId,
-                  message: 'Conversation context is now active'
-                }));
-              }
-            }
+            // Note: We don't track session IDs anymore since each query is independent
+            // This avoids the confusion between multiple chat sessions
 
             if (msg.type === 'assistant') {
               // Extract text content from assistant message
@@ -564,126 +593,6 @@ Remember: The user is working in their personal knowledge management system. Be 
 
         } catch (error: any) {
           console.error('❌ Claude query error:', error.message);
-
-          // If resume/continue failed, retry without it
-          if ((useResume || useContinue) && (error.message.includes('continue') || error.message.includes('resume'))) {
-            console.log('⚠️ Resume/continue failed, starting new session...');
-            chat.sessionId = undefined;
-
-            try {
-              // Retry without continue flag (rebuild options since queryOptions is out of scope)
-              const retryOptions = {
-                cwd: vaultPath,
-                permissionMode: 'bypassPermissions' as const,
-                maxTurns: 10,
-                model: 'claude-sonnet-4-20250514',
-                // No resume or continue - force new session
-                appendSystemPrompt: `You are an expert assistant for managing an Obsidian knowledge base vault. Key Obsidian conventions:
-
-## File Structure
-- All notes are markdown files with .md extension
-- Files can be organized in folders/subfolders
-- Daily notes typically use YYYY-MM-DD format (e.g., 2024-01-15.md)
-- Attachments often stored in specific folders (Assets, Attachments, Files)
-
-## Linking & References
-- [[wikilinks]] create connections between notes (e.g., [[My Note]] links to "My Note.md")
-- Can use aliases: [[My Note|Custom Text]]
-- Backlinks show which notes reference the current note
-- Tags use # syntax (e.g., #project/active, #idea)
-
-## Frontmatter
-- YAML metadata between --- markers at the start of files
-- Common fields: title, date, tags, aliases, status
-- Example:
-  ---
-  title: "My Note"
-  date: 2024-01-15
-  tags: [concept, review]
-  ---
-
-## Best Practices
-- When creating notes, include relevant [[wikilinks]] to connect with existing notes
-- Use descriptive filenames that work well as wikilinks
-- Preserve existing frontmatter when editing files
-- Create atomic notes focused on single concepts when appropriate
-- Consider the existing folder structure and organization patterns
-- When searching, remember to check for variations (singular/plural, different cases)
-
-## Special Features
-- Code blocks with syntax highlighting using triple backticks
-- Callouts using > [!type] syntax (e.g., > [!note], > [!warning])
-- Embeds with ![[filename]] to transclude content
-- Block references with ^block-id
-
-Remember: The user is working in their personal knowledge management system. Be helpful in organizing, finding, creating, and connecting their notes effectively.`
-              };
-              const retryMessages = query({
-                prompt: message.prompt,
-                options: retryOptions
-              });
-
-              // Process retry (simplified - same logic as above)
-              let fullResponse = '';
-              let toolsUsed = [];
-
-              for await (const msg of retryMessages) {
-                if ('session_id' in msg && msg.session_id) {
-                  chat.sessionId = msg.session_id;
-                  console.log(`📝 New session after retry: ${msg.session_id}`);
-                }
-
-                if (msg.type === 'assistant') {
-                  const content = msg.message.content;
-                  if (Array.isArray(content)) {
-                    for (const block of content) {
-                      if (block.type === 'text') {
-                        fullResponse += block.text;
-                        ws.send(JSON.stringify({
-                          type: 'chat_partial',
-                          id: message.id,
-                          content: block.text
-                        }));
-                      } else if (block.type === 'tool_use') {
-                        toolsUsed.push(block.name);
-                        ws.send(JSON.stringify({
-                          type: 'chat_tool_use',
-                          id: message.id,
-                          tool: block.name,
-                          input: block.input
-                        }));
-                      }
-                    }
-                  }
-                }
-              }
-
-              // Store assistant message from retry
-              if (fullResponse) {
-                chat.messages.push({
-                  role: 'assistant',
-                  content: fullResponse,
-                  timestamp: Date.now()
-                });
-                chat.messageCount++;
-                chat.preview = fullResponse.substring(0, 100);
-              }
-
-              // Send retry success
-              ws.send(JSON.stringify({
-                type: 'chat_complete',
-                id: message.id,
-                chatId,
-                content: fullResponse,
-                toolsUsed,
-                wasRetry: true
-              }));
-              return;
-            } catch (retryError: any) {
-              console.error('❌ Retry also failed:', retryError.message);
-              error = retryError; // Use retry error for final error message
-            }
-          }
 
           ws.send(JSON.stringify({
             type: 'chat_error',
