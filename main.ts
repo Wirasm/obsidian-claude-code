@@ -29,6 +29,10 @@ class ClaudeChatView extends ItemView {
     input: HTMLTextAreaElement;
     sendButton: HTMLButtonElement;
     currentMessageId: string | null = null;
+    sessionId: string | null = null;
+    sessionActive: boolean = false;
+    sessionInfoEl: HTMLElement | null = null;
+    statusEl: HTMLElement | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: ClaudeCodePlugin) {
         super(leaf);
@@ -50,9 +54,22 @@ class ClaudeChatView extends ItemView {
 
         // Header
         const header = container.createDiv({ cls: 'claude-header' });
-        header.createEl("h4", { text: "Claude Assistant" });
 
-        const statusIndicator = header.createDiv({ cls: 'claude-status' });
+        // Title and controls row
+        const titleRow = header.createDiv({ cls: 'claude-header-row' });
+        titleRow.createEl("h4", { text: "Claude Assistant" });
+
+        // Clear history button
+        const clearBtn = titleRow.createEl('button', {
+            text: '🔄 Clear History',
+            cls: 'claude-clear-btn'
+        });
+        clearBtn.onclick = () => this.clearHistory();
+
+        // Status row
+        const statusRow = header.createDiv({ cls: 'claude-status-row' });
+        this.statusEl = statusRow.createDiv({ cls: 'claude-status' });
+        this.sessionInfoEl = statusRow.createDiv({ cls: 'claude-session-info' });
         this.updateStatus(this.plugin.wsConnection?.readyState === WebSocket.OPEN);
 
         // Chat container
@@ -93,12 +110,66 @@ class ClaudeChatView extends ItemView {
     }
 
     updateStatus(connected: boolean) {
-        const statusEl = this.containerEl.querySelector('.claude-status');
-        if (statusEl) {
-            statusEl.empty();
-            const dot = statusEl.createSpan({ cls: `status-dot ${connected ? 'connected' : 'disconnected'}` });
-            statusEl.createSpan({ text: connected ? 'Connected' : 'Disconnected' });
+        if (this.statusEl) {
+            this.statusEl.empty();
+            const dot = this.statusEl.createSpan({ cls: `status-dot ${connected ? 'connected' : 'disconnected'}` });
+            this.statusEl.createSpan({ text: connected ? 'Connected' : 'Disconnected' });
         }
+        this.updateSessionInfo();
+    }
+
+    updateSessionInfo() {
+        if (this.sessionInfoEl) {
+            this.sessionInfoEl.empty();
+            if (this.sessionActive) {
+                this.sessionInfoEl.createSpan({
+                    cls: 'session-active',
+                    text: `📝 Context Active`
+                });
+                if (this.sessionId) {
+                    this.sessionInfoEl.createSpan({
+                        cls: 'session-id',
+                        text: ` (${this.sessionId.substring(0, 8)}...)`
+                    });
+                }
+            } else {
+                this.sessionInfoEl.createSpan({
+                    cls: 'session-inactive',
+                    text: '💭 New Conversation'
+                });
+            }
+        }
+    }
+
+    clearHistory() {
+        if (!this.plugin.wsConnection || this.plugin.wsConnection.readyState !== WebSocket.OPEN) {
+            new Notice('Not connected to Claude SDK');
+            return;
+        }
+
+        // Clear local messages
+        this.messages = [];
+        this.chatContainer.empty();
+
+        // Send clear history command to SDK server
+        this.plugin.wsConnection.send(JSON.stringify({
+            type: 'chat',
+            clearHistory: true
+        }));
+
+        // Reset session state
+        this.sessionActive = false;
+        this.sessionId = null;
+        this.updateSessionInfo();
+
+        // Add system message
+        this.addMessage({
+            role: 'system',
+            content: 'Conversation history cleared. Starting fresh!',
+            timestamp: Date.now()
+        });
+
+        new Notice('Chat history cleared');
     }
 
     async sendMessage() {
@@ -146,6 +217,25 @@ class ClaudeChatView extends ItemView {
             if (message.type === 'chat_start') {
                 // Update last message to show Claude is thinking
                 this.updateLastAssistantMessage('🤔 Thinking...');
+                // Update session info if provided
+                if (message.isNewSession !== undefined) {
+                    this.sessionActive = !message.isNewSession;
+                    if (message.sessionId) {
+                        this.sessionId = message.sessionId;
+                    }
+                    this.updateSessionInfo();
+                }
+            } else if (message.type === 'session_established') {
+                // New session established
+                this.sessionActive = true;
+                this.sessionId = message.sessionId;
+                this.updateSessionInfo();
+                console.log(`Session established: ${message.sessionId}`);
+            } else if (message.type === 'session_cleared') {
+                // Session cleared confirmation
+                this.sessionActive = false;
+                this.sessionId = null;
+                this.updateSessionInfo();
             } else if (message.type === 'chat_partial') {
                 // Stream partial content
                 const lastMessage = this.messages[this.messages.length - 1];
