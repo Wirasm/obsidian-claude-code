@@ -21,6 +21,20 @@ interface ChatMessage {
     tools?: string[];
 }
 
+interface TokenUsageData {
+    totalTokens: number;
+    percentage: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    cacheTokens: number;
+    cacheEfficiency: number;
+    turnsUsed: number;
+    contextLimit: number;
+    warningLevel: 'safe' | 'caution' | 'warning' | 'critical';
+}
+
 class ClaudeChatView extends ItemView {
     plugin: ClaudeCodePlugin;
     messages: ChatMessage[] = [];
@@ -33,6 +47,10 @@ class ClaudeChatView extends ItemView {
     sessionActive: boolean = false;
     sessionInfoEl: HTMLElement | null = null;
     statusEl: HTMLElement | null = null;
+    tokenUsage: TokenUsageData | null = null;
+    tokenUsageContainer: HTMLElement | null = null;
+    tokenProgressBar: HTMLElement | null = null;
+    tokenDetailsEl: HTMLElement | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: ClaudeCodePlugin) {
         super(leaf);
@@ -71,6 +89,10 @@ class ClaudeChatView extends ItemView {
         this.statusEl = statusRow.createDiv({ cls: 'claude-status' });
         this.sessionInfoEl = statusRow.createDiv({ cls: 'claude-session-info' });
         this.updateStatus(this.plugin.wsConnection?.readyState === WebSocket.OPEN);
+
+        // Token usage display
+        this.tokenUsageContainer = container.createDiv({ cls: 'claude-token-usage' });
+        this.createTokenUsageDisplay();
 
         // Chat container
         this.chatContainer = container.createDiv({ cls: "claude-chat-container" });
@@ -141,6 +163,74 @@ class ClaudeChatView extends ItemView {
         }
     }
 
+    createTokenUsageDisplay() {
+        if (!this.tokenUsageContainer) return;
+
+        this.tokenUsageContainer.empty();
+
+        // Progress bar container
+        const progressContainer = this.tokenUsageContainer.createDiv({ cls: 'token-progress-container' });
+
+        // Progress bar
+        const progressBarBg = progressContainer.createDiv({ cls: 'token-progress-bg' });
+        this.tokenProgressBar = progressBarBg.createDiv({ cls: 'token-progress-bar' });
+
+        // Token details
+        this.tokenDetailsEl = this.tokenUsageContainer.createDiv({ cls: 'token-details' });
+
+        // Initialize with no data
+        this.updateTokenUsage(null);
+    }
+
+    updateTokenUsage(usage: TokenUsageData | null) {
+        this.tokenUsage = usage;
+
+        if (!this.tokenProgressBar || !this.tokenDetailsEl) return;
+
+        if (!usage) {
+            // No usage data yet
+            this.tokenProgressBar.style.width = '0%';
+            this.tokenProgressBar.className = 'token-progress-bar';
+            this.tokenDetailsEl.setText('Context: No data yet');
+            return;
+        }
+
+        // Update progress bar
+        const percentage = Math.min(usage.percentage, 100);
+        this.tokenProgressBar.style.width = `${percentage}%`;
+
+        // Update color based on warning level
+        this.tokenProgressBar.className = `token-progress-bar ${usage.warningLevel}`;
+
+        // Update text details
+        const tokensText = `${usage.totalTokens.toLocaleString()} / ${usage.contextLimit.toLocaleString()}`;
+        const percentageText = `${usage.percentage.toFixed(1)}%`;
+        const turnsText = usage.turnsUsed > 0 ? ` • ${usage.turnsUsed} turns` : '';
+        const cacheText = usage.cacheEfficiency > 0 ? ` • Cache: ${usage.cacheEfficiency.toFixed(0)}%` : '';
+
+        this.tokenDetailsEl.empty();
+
+        // Main token info
+        const mainInfo = this.tokenDetailsEl.createDiv({ cls: 'token-main-info' });
+        mainInfo.createSpan({ text: `Context: ${tokensText} (${percentageText})${turnsText}${cacheText}` });
+
+        // Warning message if needed
+        if (usage.warningLevel === 'warning' || usage.warningLevel === 'critical') {
+            const warningEl = this.tokenDetailsEl.createDiv({ cls: `token-warning ${usage.warningLevel}` });
+            if (usage.warningLevel === 'critical') {
+                warningEl.setText('⚠️ Context nearly full! Consider clearing history.');
+            } else {
+                warningEl.setText('⚡ High context usage');
+            }
+        }
+
+        // Last message stats (smaller text)
+        if (usage.inputTokens > 0 || usage.outputTokens > 0) {
+            const lastMsg = this.tokenDetailsEl.createDiv({ cls: 'token-last-message' });
+            lastMsg.setText(`Last: +${usage.inputTokens} in, +${usage.outputTokens} out`);
+        }
+    }
+
     clearHistory() {
         if (!this.plugin.wsConnection || this.plugin.wsConnection.readyState !== WebSocket.OPEN) {
             new Notice('Not connected to Claude SDK');
@@ -161,6 +251,9 @@ class ClaudeChatView extends ItemView {
         this.sessionActive = false;
         this.sessionId = null;
         this.updateSessionInfo();
+
+        // Reset token usage
+        this.updateTokenUsage(null);
 
         // Add system message
         this.addMessage({
@@ -236,6 +329,9 @@ class ClaudeChatView extends ItemView {
                 this.sessionActive = false;
                 this.sessionId = null;
                 this.updateSessionInfo();
+            } else if (message.type === 'token_usage_update') {
+                // Update token usage display
+                this.updateTokenUsage(message.usage);
             } else if (message.type === 'chat_partial') {
                 // Stream partial content
                 const lastMessage = this.messages[this.messages.length - 1];

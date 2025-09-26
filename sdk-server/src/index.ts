@@ -4,6 +4,18 @@ import { WebSocketServer } from 'ws';
 // WebSocket server for Obsidian plugin communication
 const wss = new WebSocketServer({ port: 7860 });
 
+// Token usage tracking for context awareness
+interface TokenUsage {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  currentTurn: number;
+  contextLimit: number;  // Default 200K, but configurable
+  lastMessageInput: number;
+  lastMessageOutput: number;
+}
+
 // Connection state for maintaining conversation context
 interface ConnectionState {
   ws: any;
@@ -11,6 +23,7 @@ interface ConnectionState {
   hasActiveSession: boolean;  // Track if we have an ongoing conversation
   sessionId?: string;          // Store the session ID for debugging/display
   lastMessageTime?: number;    // Track last message for timeout handling
+  tokenUsage: TokenUsage;      // Track token usage for this session
 }
 
 // Store active connections with their state
@@ -25,7 +38,17 @@ wss.on('connection', (ws) => {
   connections.set(connectionId, {
     ws,
     hasActiveSession: false,  // Start with no active session
-    lastMessageTime: Date.now()
+    lastMessageTime: Date.now(),
+    tokenUsage: {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      currentTurn: 0,
+      contextLimit: 200_000,  // Standard Claude Code limit
+      lastMessageInput: 0,
+      lastMessageOutput: 0
+    }
   });
 
   console.log(`✅ Obsidian connected (ID: ${connectionId})`);
@@ -64,6 +87,18 @@ wss.on('connection', (ws) => {
           console.log(`🔄 Clearing conversation history for connection ${connectionId}`);
           connection.hasActiveSession = false;
           connection.sessionId = undefined;
+
+          // Reset token usage
+          connection.tokenUsage = {
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
+            currentTurn: 0,
+            contextLimit: 200_000,
+            lastMessageInput: 0,
+            lastMessageOutput: 0
+          };
 
           ws.send(JSON.stringify({
             type: 'session_cleared',
@@ -194,10 +229,68 @@ Remember: The user is working in their personal knowledge management system. Be 
                 }
               }
             } else if (msg.type === 'result') {
-              // Final result message
+              // Final result message with token usage
               console.log(`✅ Query completed`);
               console.log(`   Tools used: ${toolsUsed.join(', ') || 'none'}`);
               console.log(`   Success: ${msg.subtype === 'success'}`);
+
+              // Extract and track token usage
+              if (msg.usage) {
+                const usage = msg.usage;
+                const tokens = connection.tokenUsage;
+
+                // Update token counts
+                tokens.lastMessageInput = usage.input_tokens || 0;
+                tokens.lastMessageOutput = usage.output_tokens || 0;
+                tokens.totalInputTokens += tokens.lastMessageInput;
+                tokens.totalOutputTokens += tokens.lastMessageOutput;
+
+                // Track cache tokens
+                if (usage.cache_creation_input_tokens) {
+                  tokens.cacheCreationTokens += usage.cache_creation_input_tokens;
+                }
+                if (usage.cache_read_input_tokens) {
+                  tokens.cacheReadTokens += usage.cache_read_input_tokens;
+                }
+
+                // Increment turn count
+                tokens.currentTurn = msg.num_turns || tokens.currentTurn + 1;
+
+                // Calculate current context usage and percentage
+                const totalTokens = tokens.totalInputTokens + tokens.totalOutputTokens;
+                const percentage = (totalTokens / tokens.contextLimit) * 100;
+                const cacheEfficiency = tokens.cacheReadTokens > 0
+                  ? ((tokens.cacheReadTokens / (tokens.totalInputTokens + tokens.cacheReadTokens)) * 100)
+                  : 0;
+
+                // Determine warning level
+                let warningLevel: 'safe' | 'caution' | 'warning' | 'critical';
+                if (percentage < 50) warningLevel = 'safe';
+                else if (percentage < 75) warningLevel = 'caution';
+                else if (percentage < 90) warningLevel = 'warning';
+                else warningLevel = 'critical';
+
+                console.log(`📊 Token usage: ${totalTokens.toLocaleString()}/${tokens.contextLimit.toLocaleString()} (${percentage.toFixed(1)}%)`);
+                console.log(`   Input: ${tokens.lastMessageInput} | Output: ${tokens.lastMessageOutput} | Cache saved: ${tokens.cacheReadTokens}`);
+
+                // Send token usage update
+                ws.send(JSON.stringify({
+                  type: 'token_usage_update',
+                  usage: {
+                    totalTokens,
+                    percentage: parseFloat(percentage.toFixed(1)),
+                    inputTokens: tokens.lastMessageInput,
+                    outputTokens: tokens.lastMessageOutput,
+                    totalInputTokens: tokens.totalInputTokens,
+                    totalOutputTokens: tokens.totalOutputTokens,
+                    cacheTokens: tokens.cacheReadTokens,
+                    cacheEfficiency: parseFloat(cacheEfficiency.toFixed(1)),
+                    turnsUsed: tokens.currentTurn,
+                    contextLimit: tokens.contextLimit,
+                    warningLevel
+                  }
+                }));
+              }
 
               if (msg.subtype !== 'success') {
                 ws.send(JSON.stringify({

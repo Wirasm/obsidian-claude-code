@@ -256,6 +256,98 @@
     background-color: var(--background-modifier-border-hover);
 }
 
+/* Token Usage Display */
+.claude-token-usage {
+    padding: 10px 15px;
+    background-color: var(--background-secondary);
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.token-progress-container {
+    margin-bottom: 8px;
+}
+
+.token-progress-bg {
+    width: 100%;
+    height: 20px;
+    background-color: var(--background-modifier-border);
+    border-radius: 10px;
+    overflow: hidden;
+    position: relative;
+}
+
+.token-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981, #34d399);
+    border-radius: 10px;
+    transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
+    position: relative;
+    min-width: 0;
+}
+
+.token-progress-bar.safe {
+    background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+.token-progress-bar.caution {
+    background: linear-gradient(90deg, #fbbf24, #fde047);
+}
+
+.token-progress-bar.warning {
+    background: linear-gradient(90deg, #fb923c, #fdba74);
+}
+
+.token-progress-bar.critical {
+    background: linear-gradient(90deg, #ef4444, #f87171);
+    animation: criticalPulse 1s ease-in-out infinite;
+}
+
+@keyframes criticalPulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.85;
+    }
+}
+
+.token-details {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.token-main-info {
+    font-weight: 500;
+    color: var(--text-normal);
+    margin-bottom: 4px;
+}
+
+.token-warning {
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-top: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.token-warning.warning {
+    background-color: rgba(251, 146, 60, 0.1);
+    color: #fb923c;
+    border: 1px solid rgba(251, 146, 60, 0.2);
+}
+
+.token-warning.critical {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.token-last-message {
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 2px;
+}
+
 /* Loading animation for thinking state */
 .claude-message.assistant .message-content:has-text("🤔 Thinking...") {
     animation: pulse 1.5s ease-in-out infinite;
