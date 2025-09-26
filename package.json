@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-claude-code",
+  "version": "1.0.0",
+  "description": "Obsidian plugin with Claude Code SDK integration for intelligent vault management",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && pnpm run build"
+  },
+  "keywords": ["obsidian", "claude", "ai", "vault-management"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.17.3",
+    "obsidian": "latest",
+    "tslib": "2.4.0",
+    "typescript": "4.7.4"
+  }
+}

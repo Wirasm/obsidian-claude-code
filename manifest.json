@@ -1,0 +1,11 @@
+{
+  "id": "obsidian-claude-code",
+  "name": "Claude Code Assistant",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Integrate Claude AI for intelligent vault management and assistance",
+  "author": "Rasmus Widing",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}
