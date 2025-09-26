@@ -1,6 +1,7 @@
 /* Claude Code Assistant Styles */
 
-.claude-chat-view {
+.claude-chat-view,
+.claude-chat-list-view {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -8,7 +9,8 @@
 }
 
 /* Header */
-.claude-header {
+.claude-header,
+.claude-list-header {
     padding: 10px 15px;
     border-bottom: 1px solid var(--background-modifier-border);
     background-color: var(--background-secondary);
@@ -27,7 +29,8 @@
     font-weight: 600;
 }
 
-.claude-clear-btn {
+.claude-clear-btn,
+.claude-back-btn {
     padding: 4px 10px;
     font-size: 12px;
     background-color: var(--background-modifier-border);
@@ -38,9 +41,28 @@
     transition: all 0.2s ease;
 }
 
-.claude-clear-btn:hover {
+.claude-clear-btn:hover,
+.claude-back-btn:hover {
     background-color: var(--background-modifier-border-hover);
     color: var(--text-normal);
+}
+
+.claude-new-chat-btn {
+    padding: 6px 12px;
+    font-size: 13px;
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-weight: 500;
+}
+
+.claude-new-chat-btn:hover {
+    background-color: var(--interactive-accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .claude-status-row {
@@ -360,4 +382,140 @@
     50% {
         opacity: 0.6;
     }
+}
+
+/* Chat List View Styles */
+.claude-chat-list-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+}
+
+.claude-empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+}
+
+.claude-empty-state p {
+    margin: 10px 0;
+}
+
+.claude-empty-hint {
+    font-size: 13px;
+    color: var(--text-faint);
+}
+
+/* Chat Item */
+.claude-chat-item {
+    background-color: var(--background-secondary);
+    border-radius: 8px;
+    padding: 12px 15px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    border: 1px solid transparent;
+}
+
+.claude-chat-item:hover {
+    background-color: var(--background-secondary-alt);
+    border-color: var(--background-modifier-border);
+    transform: translateX(2px);
+}
+
+.claude-chat-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.claude-chat-title {
+    font-weight: 500;
+    font-size: 14px;
+    color: var(--text-normal);
+}
+
+.claude-chat-options {
+    padding: 2px 6px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.claude-chat-options:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+.claude-chat-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.claude-chat-stats {
+    margin-right: 4px;
+}
+
+.claude-chat-tokens {
+    font-weight: 500;
+}
+
+.claude-chat-tokens.low {
+    color: var(--text-success);
+}
+
+.claude-chat-tokens.medium {
+    color: var(--text-warning);
+}
+
+.claude-chat-tokens.high {
+    color: var(--text-error);
+}
+
+.claude-chat-preview {
+    font-size: 12px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 4px;
+}
+
+/* Context Menu */
+.claude-context-menu {
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    min-width: 120px;
+}
+
+.claude-menu-item {
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-normal);
+    transition: all 0.15s ease;
+}
+
+.claude-menu-item:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.claude-menu-item.danger {
+    color: var(--text-error);
+}
+
+.claude-menu-item.danger:hover {
+    background-color: rgba(255, 0, 0, 0.1);
 }

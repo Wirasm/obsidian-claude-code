@@ -16,14 +16,30 @@ interface TokenUsage {
   lastMessageOutput: number;
 }
 
+// Individual chat session
+interface ChatSession {
+  id: string;              // Our internal chat ID (e.g., chat_xxxxx)
+  sessionId?: string;      // Claude's session ID from SDK
+  title: string;           // Display name for the chat
+  icon: string;            // Emoji icon for the chat
+  createdAt: number;       // Creation timestamp
+  lastMessageAt: number;   // Last activity timestamp
+  messageCount: number;    // Total messages in this chat
+  tokenUsage: TokenUsage;  // Token tracking for this chat
+  preview: string;         // Last message snippet for display
+  messages: Array<{        // Recent messages for context
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>;
+}
+
 // Connection state for maintaining conversation context
 interface ConnectionState {
   ws: any;
   vaultPath?: string;
-  hasActiveSession: boolean;  // Track if we have an ongoing conversation
-  sessionId?: string;          // Store the session ID for debugging/display
-  lastMessageTime?: number;    // Track last message for timeout handling
-  tokenUsage: TokenUsage;      // Track token usage for this session
+  currentChatId?: string;              // Currently active chat
+  chats: Map<string, ChatSession>;    // All chat sessions
 }
 
 // Store active connections with their state
@@ -37,18 +53,7 @@ wss.on('connection', (ws) => {
   const connectionId = Math.random().toString(36).substring(7);
   connections.set(connectionId, {
     ws,
-    hasActiveSession: false,  // Start with no active session
-    lastMessageTime: Date.now(),
-    tokenUsage: {
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
-      currentTurn: 0,
-      contextLimit: 200_000,  // Standard Claude Code limit
-      lastMessageInput: 0,
-      lastMessageOutput: 0
-    }
+    chats: new Map()  // Start with no chats
   });
 
   console.log(`✅ Obsidian connected (ID: ${connectionId})`);
@@ -73,6 +78,158 @@ wss.on('connection', (ws) => {
           message: 'Claude Code SDK ready. You can start chatting!'
         }));
 
+      } else if (message.type === 'list_chats') {
+        // Return list of all chats
+        const connection = connections.get(connectionId);
+        if (!connection) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Connection not found' }));
+          return;
+        }
+
+        const chatList = Array.from(connection.chats.values()).map(chat => ({
+          id: chat.id,
+          title: chat.title,
+          icon: chat.icon,
+          createdAt: chat.createdAt,
+          lastMessageAt: chat.lastMessageAt,
+          messageCount: chat.messageCount,
+          preview: chat.preview,
+          tokenUsage: {
+            total: chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens,
+            percentage: ((chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens) / chat.tokenUsage.contextLimit) * 100
+          }
+        }));
+
+        ws.send(JSON.stringify({
+          type: 'chat_list',
+          chats: chatList
+        }));
+
+      } else if (message.type === 'new_chat') {
+        // Create a new chat
+        const connection = connections.get(connectionId);
+        if (!connection) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Connection not found' }));
+          return;
+        }
+
+        const chatId = `chat_${Math.random().toString(36).substring(7)}`;
+        const newChat: ChatSession = {
+          id: chatId,
+          title: message.title || 'New Chat',
+          icon: message.icon || '💬',
+          createdAt: Date.now(),
+          lastMessageAt: Date.now(),
+          messageCount: 0,
+          tokenUsage: {
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
+            currentTurn: 0,
+            contextLimit: 200_000,
+            lastMessageInput: 0,
+            lastMessageOutput: 0
+          },
+          preview: '',
+          messages: []
+        };
+
+        connection.chats.set(chatId, newChat);
+        connection.currentChatId = chatId;
+
+        ws.send(JSON.stringify({
+          type: 'chat_created',
+          chat: {
+            id: chatId,
+            title: newChat.title,
+            icon: newChat.icon
+          }
+        }));
+
+      } else if (message.type === 'load_chat') {
+        // Load an existing chat
+        const connection = connections.get(connectionId);
+        if (!connection) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Connection not found' }));
+          return;
+        }
+
+        const chat = connection.chats.get(message.chatId);
+        if (!chat) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Chat not found' }));
+          return;
+        }
+
+        connection.currentChatId = message.chatId;
+
+        ws.send(JSON.stringify({
+          type: 'chat_loaded',
+          chatId: message.chatId,
+          messages: chat.messages,
+          tokenUsage: {
+            totalTokens: chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens,
+            percentage: ((chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens) / chat.tokenUsage.contextLimit) * 100,
+            inputTokens: chat.tokenUsage.lastMessageInput,
+            outputTokens: chat.tokenUsage.lastMessageOutput,
+            totalInputTokens: chat.tokenUsage.totalInputTokens,
+            totalOutputTokens: chat.tokenUsage.totalOutputTokens,
+            cacheTokens: chat.tokenUsage.cacheReadTokens,
+            cacheEfficiency: chat.tokenUsage.cacheReadTokens > 0
+              ? ((chat.tokenUsage.cacheReadTokens / (chat.tokenUsage.totalInputTokens + chat.tokenUsage.cacheReadTokens)) * 100)
+              : 0,
+            turnsUsed: chat.tokenUsage.currentTurn,
+            contextLimit: chat.tokenUsage.contextLimit,
+            warningLevel: ((chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens) / chat.tokenUsage.contextLimit) * 100 < 50 ? 'safe' :
+                         ((chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens) / chat.tokenUsage.contextLimit) * 100 < 75 ? 'caution' :
+                         ((chat.tokenUsage.totalInputTokens + chat.tokenUsage.totalOutputTokens) / chat.tokenUsage.contextLimit) * 100 < 90 ? 'warning' : 'critical'
+          }
+        }));
+
+      } else if (message.type === 'delete_chat') {
+        // Delete a chat
+        const connection = connections.get(connectionId);
+        if (!connection) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Connection not found' }));
+          return;
+        }
+
+        connection.chats.delete(message.chatId);
+        if (connection.currentChatId === message.chatId) {
+          connection.currentChatId = undefined;
+        }
+
+        ws.send(JSON.stringify({
+          type: 'chat_deleted',
+          chatId: message.chatId
+        }));
+
+      } else if (message.type === 'rename_chat') {
+        // Rename a chat
+        const connection = connections.get(connectionId);
+        if (!connection) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Connection not found' }));
+          return;
+        }
+
+        const chat = connection.chats.get(message.chatId);
+        if (!chat) {
+          ws.send(JSON.stringify({ type: 'error', error: 'Chat not found' }));
+          return;
+        }
+
+        chat.title = message.title;
+        if (message.icon) {
+          chat.icon = message.icon;
+        }
+
+        ws.send(JSON.stringify({
+          type: 'chat_renamed',
+          chatId: message.chatId,
+          title: message.title,
+          icon: chat.icon
+        }));
+
       } else if (message.type === 'chat') {
         const connection = connections.get(connectionId);
         if (!connection) {
@@ -82,14 +239,76 @@ wss.on('connection', (ws) => {
 
         const vaultPath = connection.vaultPath || process.cwd();
 
-        // Handle clear history request
+        // Get or create chat
+        let chatId = message.chatId || connection.currentChatId;
+        let chat: ChatSession;
+
+        if (!chatId || !connection.chats.has(chatId)) {
+          // Create new chat if none exists
+          chatId = `chat_${Math.random().toString(36).substring(7)}`;
+
+          // Auto-generate title from first message (truncate to 50 chars)
+          const autoTitle = message.prompt.length > 50
+            ? message.prompt.substring(0, 47) + '...'
+            : message.prompt;
+
+          // Choose icon based on content keywords
+          let icon = '💬';
+          const prompt = message.prompt.toLowerCase();
+          if (prompt.includes('code') || prompt.includes('plugin') || prompt.includes('develop')) icon = '💻';
+          else if (prompt.includes('note') || prompt.includes('vault') || prompt.includes('obsidian')) icon = '📝';
+          else if (prompt.includes('research') || prompt.includes('study')) icon = '🔬';
+          else if (prompt.includes('help') || prompt.includes('how')) icon = '❓';
+          else if (prompt.includes('bug') || prompt.includes('error') || prompt.includes('fix')) icon = '🐛';
+          else if (prompt.includes('idea') || prompt.includes('think')) icon = '💡';
+
+          chat = {
+            id: chatId,
+            title: autoTitle,
+            icon: icon,
+            createdAt: Date.now(),
+            lastMessageAt: Date.now(),
+            messageCount: 0,
+            tokenUsage: {
+              totalInputTokens: 0,
+              totalOutputTokens: 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: 0,
+              currentTurn: 0,
+              contextLimit: 200_000,
+              lastMessageInput: 0,
+              lastMessageOutput: 0
+            },
+            preview: '',
+            messages: []
+          };
+
+          connection.chats.set(chatId, chat);
+          connection.currentChatId = chatId;
+
+          // Notify about new chat creation
+          ws.send(JSON.stringify({
+            type: 'chat_created',
+            chat: {
+              id: chatId,
+              title: chat.title,
+              icon: chat.icon
+            }
+          }));
+        } else {
+          chat = connection.chats.get(chatId)!;
+        }
+
+        // Handle clear history request for current chat
         if (message.clearHistory) {
-          console.log(`🔄 Clearing conversation history for connection ${connectionId}`);
-          connection.hasActiveSession = false;
-          connection.sessionId = undefined;
+          console.log(`🔄 Clearing conversation history for chat ${chatId}`);
+          chat.sessionId = undefined;
+          chat.messages = [];
+          chat.messageCount = 0;
+          chat.preview = '';
 
           // Reset token usage
-          connection.tokenUsage = {
+          chat.tokenUsage = {
             totalInputTokens: 0,
             totalOutputTokens: 0,
             cacheCreationTokens: 0,
@@ -102,36 +321,57 @@ wss.on('connection', (ws) => {
 
           ws.send(JSON.stringify({
             type: 'session_cleared',
+            chatId,
             message: 'Conversation history cleared. Next message will start a new session.'
           }));
           return;
         }
 
         // Update last message time
-        connection.lastMessageTime = Date.now();
+        chat.lastMessageAt = Date.now();
+
+        // Store user message
+        chat.messages.push({
+          role: 'user',
+          content: message.prompt,
+          timestamp: Date.now()
+        });
+        chat.messageCount++;
+        chat.preview = message.prompt.substring(0, 100); // Update preview with latest message
 
         console.log(`🤖 Processing chat message...`);
+        console.log(`   Chat: ${chat.title} (${chatId})`);
         console.log(`   Prompt: "${message.prompt.substring(0, 50)}..."`);
         console.log(`   Working directory: ${vaultPath}`);
-        console.log(`   Session state: ${connection.hasActiveSession ? `Active (ID: ${connection.sessionId})` : 'New conversation'}`);
-        console.log(`   Using continue: ${connection.hasActiveSession}`);
+        console.log(`   Session state: ${chat.sessionId ? `Active (ID: ${chat.sessionId})` : 'New conversation'}`);
+
+        // Determine if we should continue or resume
+        let useResume = false;
+        let useContinue = false;
+
+        if (chat.sessionId) {
+          // We have a session ID - use resume
+          useResume = true;
+          console.log(`   Using resume with session: ${chat.sessionId}`);
+        }
 
         // Send immediate acknowledgment
         ws.send(JSON.stringify({
           type: 'chat_start',
           id: message.id,
-          isNewSession: !connection.hasActiveSession,
-          sessionId: connection.sessionId
+          chatId,
+          isNewSession: !chat.sessionId,
+          sessionId: chat.sessionId
         }));
 
         try {
-          // Build query options with continue flag if we have an active session
+          // Build query options with resume/continue based on chat state
           const queryOptions: any = {
             cwd: vaultPath, // Work in the vault directory
             permissionMode: 'bypassPermissions' as const, // Don't ask for permission
             maxTurns: 10, // Allow multiple tool uses
             model: 'claude-sonnet-4-20250514',
-            continue: connection.hasActiveSession, // KEY: Continue conversation if we have active session
+            ...(useResume ? { resume: chat.sessionId } : {}), // Use resume if we have a session ID
             appendSystemPrompt: `You are an expert assistant for managing an Obsidian knowledge base vault. Key Obsidian conventions:
 
 ## File Structure
@@ -189,15 +429,15 @@ Remember: The user is working in their personal knowledge management system. Be 
             if ('session_id' in msg && msg.session_id) {
               currentSessionId = msg.session_id;
 
-              // Update connection state if this is a new session
-              if (!connection.hasActiveSession) {
-                connection.hasActiveSession = true;
-                connection.sessionId = currentSessionId;
-                console.log(`📝 New session established: ${currentSessionId}`);
+              // Update chat's session ID if this is new or changed
+              if (!chat.sessionId || chat.sessionId !== currentSessionId) {
+                chat.sessionId = currentSessionId;
+                console.log(`📝 Session established for chat: ${currentSessionId}`);
 
-                // Notify Obsidian about the new session
+                // Notify Obsidian about the session
                 ws.send(JSON.stringify({
                   type: 'session_established',
+                  chatId,
                   sessionId: currentSessionId,
                   message: 'Conversation context is now active'
                 }));
@@ -234,10 +474,10 @@ Remember: The user is working in their personal knowledge management system. Be 
               console.log(`   Tools used: ${toolsUsed.join(', ') || 'none'}`);
               console.log(`   Success: ${msg.subtype === 'success'}`);
 
-              // Extract and track token usage
+              // Extract and track token usage for this specific chat
               if (msg.usage) {
                 const usage = msg.usage;
-                const tokens = connection.tokenUsage;
+                const tokens = chat.tokenUsage;
 
                 // Update token counts
                 tokens.lastMessageInput = usage.input_tokens || 0;
@@ -302,10 +542,22 @@ Remember: The user is working in their personal knowledge management system. Be 
             }
           }
 
+          // Store assistant message
+          if (fullResponse) {
+            chat.messages.push({
+              role: 'assistant',
+              content: fullResponse,
+              timestamp: Date.now()
+            });
+            chat.messageCount++;
+            chat.preview = fullResponse.substring(0, 100); // Update preview
+          }
+
           // Send final response
           ws.send(JSON.stringify({
             type: 'chat_complete',
             id: message.id,
+            chatId,
             content: fullResponse,
             toolsUsed
           }));
@@ -313,11 +565,10 @@ Remember: The user is working in their personal knowledge management system. Be 
         } catch (error: any) {
           console.error('❌ Claude query error:', error.message);
 
-          // If continuation failed and we were trying to continue a session, retry without continue
-          if (connection.hasActiveSession && error.message.includes('continue')) {
-            console.log('⚠️ Continue failed, starting new session...');
-            connection.hasActiveSession = false;
-            connection.sessionId = undefined;
+          // If resume/continue failed, retry without it
+          if ((useResume || useContinue) && (error.message.includes('continue') || error.message.includes('resume'))) {
+            console.log('⚠️ Resume/continue failed, starting new session...');
+            chat.sessionId = undefined;
 
             try {
               // Retry without continue flag (rebuild options since queryOptions is out of scope)
@@ -326,7 +577,7 @@ Remember: The user is working in their personal knowledge management system. Be 
                 permissionMode: 'bypassPermissions' as const,
                 maxTurns: 10,
                 model: 'claude-sonnet-4-20250514',
-                continue: false, // Force new session
+                // No resume or continue - force new session
                 appendSystemPrompt: `You are an expert assistant for managing an Obsidian knowledge base vault. Key Obsidian conventions:
 
 ## File Structure
@@ -378,8 +629,7 @@ Remember: The user is working in their personal knowledge management system. Be 
 
               for await (const msg of retryMessages) {
                 if ('session_id' in msg && msg.session_id) {
-                  connection.hasActiveSession = true;
-                  connection.sessionId = msg.session_id;
+                  chat.sessionId = msg.session_id;
                   console.log(`📝 New session after retry: ${msg.session_id}`);
                 }
 
@@ -408,10 +658,22 @@ Remember: The user is working in their personal knowledge management system. Be 
                 }
               }
 
+              // Store assistant message from retry
+              if (fullResponse) {
+                chat.messages.push({
+                  role: 'assistant',
+                  content: fullResponse,
+                  timestamp: Date.now()
+                });
+                chat.messageCount++;
+                chat.preview = fullResponse.substring(0, 100);
+              }
+
               // Send retry success
               ws.send(JSON.stringify({
                 type: 'chat_complete',
                 id: message.id,
+                chatId,
                 content: fullResponse,
                 toolsUsed,
                 wasRetry: true
